@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+"""
+Model Training Optimizer Module
+
+This module is designed to assist users in determining the optimal range of learning rates
+and batch sizes for training a deep learning model. By using a small sample of training data,
+the module provides an estimate of the best starting points for these hyperparameters,
+enabling more efficient training when scaling up to the full dataset.
+
+The module works by iteratively testing various combinations of learning rates and batch sizes.
+For each combination, a model is trained and validated, with the resulting accuracy recorded.
+The model that achieves the highest validation accuracy is considered the best, and the associated
+hyperparameters are recommended for further training on a larger dataset.
+
+Features:
+    - Automatic discovery and validation of training and validation data directories.
+    - Support for customizable ranges of learning rates and batch sizes.
+    - Flexible configuration through command-line arguments.
+    - Detailed reporting of the best model's performance and hyperparameter settings.
+
+Typical usage example:
+
+    python model_optimizer.py --data-path /path/to/data --verbose
+
+Attributes:
+    SCRIPT_DIR (Path): The directory where this script is located.
+    DEFAULT_DATA_PATH (Path): The default path for image data.
+    DEFAULT_TRAINING_DIR (str): The directory name for training data.
+    DEFAULT_VALIDATION_DIR (str): The directory name for validation data.
+    DEFAULT_TRAINING_DESIRED_DIR (Path): Path to the desired training data.
+    DEFAULT_TRAINING_NOT_DESIRED_DIR (Path): Path to the not desired training data.
+    DEFAULT_VALIDATION_DESIRED_DIR (Path): Path to the desired validation data.
+    DEFAULT_VALIDATION_NOT_DESIRED_DIR (Path): Path to the not desired validation data.
+    DEFAULT_MODEL_OUTPUT_PATH (Path): The default path to save the model.
+    TODAY_DATE (str): The current date in YYYY-MM-DD format.
+    DEFAULT_NUM_EPOCHS (int): The default number of epochs for training.
+    DEFAULT_NUMS_IN_RANGE (int): The default number of values in the generated ranges.
+    DEFAULT_BATCH_SIZE (int): The default batch size for training.
+    DEFAULT_LEARNING_RATE (float): The default learning rate for the model.
+    DEFAULT_IMAGE_WIDTH (int): The default image width for resizing.
+    DEFAULT_IMAGE_HEIGHT (int): The default image height for resizing.
+    DEFAULT_IMAGE_MEAN_RED (float): The mean normalization value for the red channel.
+    DEFAULT_IMAGE_MEAN_GREEN (float): The mean normalization value for the green channel.
+    DEFAULT_IMAGE_MEAN_BLUE (float): The mean normalization value for the blue channel.
+    DEFAULT_STD_RED (float): The standard deviation normalization value for the red channel.
+    DEFAULT_STD_GREEN (float): The standard deviation normalization value for the green channel.
+    DEFAULT_STD_BLUE (float): The standard deviation normalization value for the blue channel.
+
+Required Data Directory Structure:
+    The provided data directory must follow this structure for the module to function correctly:
+
+    data/
+    ├── train/
+    │   ├── desired/
+    │   │   ├── <image1>  # Images classified as "desired" for training
+    │   │   └── ...
+    │   └── not_desired/
+    │       ├── <image2>  # Images classified as "not desired" for training
+    │       └── ...
+    └── validation/
+        ├── desired/
+        │   ├── <image3>  # Images classified as "desired" for validation
+        │   └── ...
+        └── not_desired/
+            ├── <image4>  # Images classified as "not desired" for validation
+            └── ...
+
+    - `train/desired/`: Directory containing images for training that are classified as "desired".
+    - `train/not_desired/`: Directory containing images for training that are classified as "not desired".
+    - `validation/desired/`: Directory containing images for validation that are classified as "desired".
+    - `validation/not_desired/`: Directory containing images for validation that are classified as "not desired".
+
+    Ensure that each directory contains the appropriate images for training and validation.
+    The module expects this structure to correctly load and process the datasets.
+
+Example Command:
+    To run the module with a custom data path and enable verbose output:
+
+        python model_optimizer.py --data-path /path/to/data --verbose
+"""
+
+
+import argparse
+from collections import namedtuple
+from datetime import date
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, models
+from torchvision.models import ResNet18_Weights
+
+SCRIPT_DIR = Path(__file__).resolve().parent  # Path to the directory containing this script.
+DEFAULT_DATA_PATH = SCRIPT_DIR / "image-data"  # Default path to the image data repository.
+DEFAULT_TRAINING_DIR = "train"  # Directory name for training data.
+DEFAULT_VALIDATION_DIR = "validation"  # Directory name for validation data.
+DEFAULT_TRAINING_DESIRED_DIR = Path(DEFAULT_TRAINING_DIR) / "desired"  # Path to the "desired" training data.
+DEFAULT_TRAINING_NOT_DESIRED_DIR = Path(DEFAULT_TRAINING_DIR) / "not_desired"  # Path to the "not desired" training
+# data.
+DEFAULT_VALIDATION_DESIRED_DIR = Path(DEFAULT_VALIDATION_DIR) / "desired"  # Path to the "desired" validation data.
+DEFAULT_VALIDATION_NOT_DESIRED_DIR = Path(DEFAULT_VALIDATION_DIR) / "not_desired"  # Path to the "not desired"
+# validation data.
+DEFAULT_MODEL_OUTPUT_PATH = SCRIPT_DIR / "models"  # Default path to save the trained model.
+
+TODAY_DATE = date.today().strftime("%Y-%m-%d")  # Today's date formatted as YYYY-MM-DD.
+
+DEFAULT_NUM_EPOCHS = 10  # Default number of epochs for training.
+DEFAULT_NUMS_IN_RANGE = 5  # Default number of values to generate in parameter ranges.
+
+DEFAULT_BATCH_SIZE = 32  # Default batch size for training.
+DEFAULT_LEARNING_RATE = 0.001  # Default learning rate for the model.
+
+DEFAULT_IMAGE_WIDTH = 224  # Default image width for resizing.
+DEFAULT_IMAGE_HEIGHT = 224  # Default image height for resizing.
+DEFAULT_IMAGE_MEAN_RED = 0.485  # Mean normalization value for the red channel.
+DEFAULT_IMAGE_MEAN_GREEN = 0.456  # Mean normalization value for the green channel.
+DEFAULT_IMAGE_MEAN_BLUE = 0.406  # Mean normalization value for the blue channel.
+DEFAULT_STD_RED = 0.229  # Standard deviation normalization value for the red channel.
+DEFAULT_STD_GREEN = 0.224  # Standard deviation normalization value for the green channel.
+DEFAULT_STD_BLUE = 0.225  # Standard deviation normalization value for the blue channel.
+
+
+class ModelOptimizerException(Exception):
+    """Custom Exception for this module."""
+
+
+def main():
+    """
+    The main function that orchestrates the optimization process.
+
+    Parses command-line arguments, checks data paths, and runs the model optimization
+    to determine the best batch size and learning rate. The best model is saved to
+    the specified output path.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
+    args = parse_args()
+
+    # Print module level docstring an exit if 'info' argument collected.
+    if args.info:
+        print(__doc__)
+        exit()
+
+    data_path = Path(args.data_path) if args.data_path else DEFAULT_DATA_PATH
+    check_data_paths(data_path)  # Confirm data_path is structured properly and contains files.
+    model_output_path = Path(args.model_output_path) if args.model_output_path else DEFAULT_MODEL_OUTPUT_PATH
+
+    batch_size_range, learning_rate_range = get_ranges(args.batch_size, args.learning_rate)
+    best_model = find_best_model(batch_size_range, learning_rate_range, data_path, args.verbose, args.epochs)
+    save_model(best_model.model, best_model.name, model_output_path)
+    gen_completion_msg(best_model)
+
+
+def find_best_model(batch_size_range, learning_rate_range, data_path, verbose=False, epochs=DEFAULT_NUM_EPOCHS):
+    """
+    Finds the best model by testing different combinations of batch sizes and learning rates.
+
+    Iterates over the provided ranges of batch sizes and learning rates to train and validate models.
+    The model with the highest validation accuracy is selected as the best model.
+
+    Args:
+        batch_size_range (list): A list of batch sizes to test.
+        learning_rate_range (list): A list of learning rates to test.
+        data_path (Path): The path to the training and validation data.
+        verbose (bool): Whether to print detailed output during the process. Default is True.
+        epochs (int): The number of training epochs. Default is DEFAULT_NUM_EPOCHS.
+
+    Returns:
+        BestModel: A namedtuple containing the best model, its accuracy, name, batch size, and learning rate.
+    """
+    BestModel = namedtuple("BestModel", ["model", "accuracy", "name", "batch_size", "learning_rate"])
+    best_model = None
+
+    for batch_size in batch_size_range:
+        batch_size = int(batch_size)  # Batch size must be an integer.
+        for learning_rate in learning_rate_range:
+            validated_model, accuracy, model_name = \
+                generate_model(batch_size, learning_rate, data_path, verbose, epochs)
+            if not best_model or accuracy > best_model.accuracy:
+                best_model = BestModel(model=validated_model, accuracy=accuracy, name=model_name,
+                                       batch_size=batch_size, learning_rate=learning_rate)
+    return best_model
+
+
+def generate_model(batch_size, learning_rate, data_path, verbose=False, epochs=DEFAULT_NUM_EPOCHS):
+    """
+    Trains and validates a model with the given batch size and learning rate.
+
+    Loads the data, creates the model, trains it, and evaluates its performance.
+    The trained model and its validation accuracy are returned.
+
+    Args:
+        batch_size (int): The batch size to use for training.
+        learning_rate (float): The learning rate to use for training.
+        data_path (Path): The path to the training and validation data.
+        verbose (bool): Whether to print detailed output during the process. Default is True.
+        epochs (int): The number of training epochs. Default is DEFAULT_NUM_EPOCHS.
+
+    Returns:
+        tuple: A tuple containing the validated model, its accuracy, and the model name.
+    """
+    train_loader, val_loader = get_image_loaders(data_path=data_path, batch_size=batch_size)
+    model, criterion, optimizer, device = get_model(learning_rate=learning_rate)
+    trained_model = train_model(model, criterion, optimizer, device, train_loader, epochs, verbose)
+    validated_model, accuracy = validate_model(trained_model, val_loader, device, verbose)
+    model_name = generate_model_name(accuracy)
+    return validated_model, accuracy, model_name
+
+
+def generate_model_name(validation_accuracy):
+    """
+    Generates a name for the model based on its validation accuracy.
+
+    The model name includes the current date and the accuracy formatted as an integer.
+
+    Args:
+        validation_accuracy (float): The validation accuracy of the model.
+
+    Returns:
+        str: The generated model name.
+    """
+    validation_accuracy = float(validation_accuracy)
+    short_accuracy = f"{validation_accuracy:.0f}"
+    return f"{TODAY_DATE}_Accuracy_{short_accuracy}.pth"
+
+
+def save_model(model, name, path=DEFAULT_MODEL_OUTPUT_PATH):
+    """
+    Saves the trained model to the specified directory.
+
+    Creates the directory if it does not exist and saves the model's state dictionary.
+
+    Args:
+        model (nn.Module): The trained model to save.
+        name (str): The name to use for saving the model.
+        path (Path): The directory where the model will be saved. Default is DEFAULT_MODEL_OUTPUT_PATH.
+
+    Returns:
+        None
+    """
+    create_directory_if_not_exists(path)
+    torch.save(model.state_dict(), path / name)
+
+
+def validate_model(model, val_loader, device, verbose=False):
+    """
+    Validates the trained model on the validation dataset.
+
+    Evaluates the model's performance and calculates its accuracy.
+
+    Args:
+        model (nn.Module): The trained model to validate.
+        val_loader (DataLoader): The DataLoader for the validation dataset.
+        device (torch.device): The device (CPU or GPU) to use for validation.
+        verbose (bool): Whether to print the validation accuracy. Default is True.
+
+    Returns:
+        tuple: A tuple containing the model and its validation accuracy.
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    accuracy = 100 * correct / total
+    if verbose:
+        print(f"Validation Accuracy: {accuracy}%")
+
+    return model, accuracy
+
+
+def train_model(model, criterion, optimizer, device, train_loader, epochs=DEFAULT_NUM_EPOCHS, verbose=False):
+    """
+    Trains the model on the training dataset.
+
+    Runs the training loop for a specified number of epochs, updating the model's parameters.
+
+    Args:
+        model (nn.Module): The model to train.
+        criterion (nn.Module): The loss function.
+        optimizer (torch.optim.Optimizer): The optimizer for updating model parameters.
+        device (torch.device): The device (CPU or GPU) to use for training.
+        train_loader (DataLoader): The DataLoader for the training dataset.
+        epochs (int): The number of training epochs. Default is DEFAULT_NUM_EPOCHS.
+        verbose (bool): Whether to print the loss at each epoch. Default is True.
+
+    Returns:
+        nn.Module: The trained model.
+    """
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        if verbose:
+            print(f"Epoch {epoch + 1}, Loss: {running_loss / len(train_loader)}")
+
+    return model
+
+
+def get_model(learning_rate=DEFAULT_LEARNING_RATE):
+    """
+    Initializes the model, loss function, optimizer, and device.
+
+    Loads a pre-trained ResNet-18 model, modifies the final layer, and prepares the model for training.
+
+    Args:
+        learning_rate (float): The learning rate for the optimizer. Default is DEFAULT_LEARNING_RATE.
+
+    Returns:
+        tuple: A tuple containing the model, loss function, optimizer, and device.
+    """
+    model = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+    # Replace the final fully connected layer
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, 2)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Use cuda if available.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    return model, criterion, optimizer, device
+
+
+def get_image_loaders(data_path=DEFAULT_DATA_PATH, batch_size=DEFAULT_BATCH_SIZE):
+    """
+    Loads the training and validation datasets and creates DataLoaders.
+
+    Defines the necessary image transformations and loads the datasets from the provided paths.
+
+    Args:
+        data_path (Path): The path to the training and validation data.
+        batch_size (int): The batch size to use for loading the data. Default is DEFAULT_BATCH_SIZE.
+
+    Returns:
+        tuple: A tuple containing the DataLoader for the training and validation datasets.
+    """
+    # Define transformations.
+    transform = transform_images()
+
+    # Define paths for training and validation data.
+    training_path = data_path / DEFAULT_TRAINING_DIR
+    validation_path = data_path / DEFAULT_VALIDATION_DIR
+
+    # Load the training and validation datasets.
+    train_dataset = datasets.ImageFolder(root=str(training_path.resolve()), transform=transform)
+    val_dataset = datasets.ImageFolder(root=str(validation_path.resolve()), transform=transform)
+
+    # Create data loaders.
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader
+
+
+def transform_images(
+        width=DEFAULT_IMAGE_WIDTH,
+        height=DEFAULT_IMAGE_HEIGHT,
+        mean_red=DEFAULT_IMAGE_MEAN_RED,
+        mean_green=DEFAULT_IMAGE_MEAN_GREEN,
+        mean_blue=DEFAULT_IMAGE_MEAN_BLUE,
+        std_red=DEFAULT_STD_RED,
+        std_green=DEFAULT_STD_GREEN,
+        std_blue=DEFAULT_STD_BLUE):
+    """
+    Defines the image transformations to be applied to the dataset.
+
+    Resizes images, converts them to tensors, and normalizes them using the provided mean and standard deviation.
+
+    Args:
+        width (int): The width to resize images to. Default is DEFAULT_IMAGE_WIDTH.
+        height (int): The height to resize images to. Default is DEFAULT_IMAGE_HEIGHT.
+        mean_red (float): The mean normalization value for the red channel. Default is DEFAULT_IMAGE_MEAN_RED.
+        mean_green (float): The mean normalization value for the green channel. Default is DEFAULT_IMAGE_MEAN_GREEN.
+        mean_blue (float): The mean normalization value for the blue channel. Default is DEFAULT_IMAGE_MEAN_BLUE.
+        std_red (float): The standard deviation normalization value for the red channel. Default is DEFAULT_STD_RED.
+        std_green (float): The standard deviation normalization value for the green channel. Default is
+        DEFAULT_STD_GREEN.
+        std_blue (float): The standard deviation normalization value for the blue channel. Default is
+        DEFAULT_STD_BLUE.
+
+    Returns:
+        transforms.Compose: The composed image transformations.
+    """
+    return transforms.Compose([
+        transforms.Resize((width, height)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[mean_red, mean_green, mean_blue], std=[std_red, std_green, std_blue])
+    ])
+
+
+def get_ranges(*nums):
+    """
+    Generates ranges of values for each input number.
+
+    Calls `get_range` on each input number to generate a range of values around the original number.
+
+    Args:
+        *nums (float): The numbers for which to generate ranges.
+
+    Returns:
+        list: A list of lists containing the ranges for each input number.
+    """
+    return [get_range(num) for num in nums]
+
+
+def get_range(value, num_values_in_range=DEFAULT_NUMS_IN_RANGE):
+    """
+    Generates a range of values around the provided value.
+
+    Calculates 10% less and 10% more than the input value and generates evenly spaced values between them.
+
+    Args:
+        value (float): The value around which to generate a range.
+        num_values_in_range (int): The number of values in the range. Default is DEFAULT_NUMS_IN_RANGE.
+
+    Returns:
+        list: A list of evenly spaced values around the input value.
+    """
+    ten_percent_less = value * 0.9
+    ten_percent_more = value * 1.1
+
+    # Ensure we have more than 1 value to create a range
+    if num_values_in_range > 1:
+        step = (ten_percent_more - ten_percent_less) / (num_values_in_range - 1)
+    else:
+        step = 0
+
+    # Generate values evenly spaced between 10% less and 10% more.
+    range_values = [ten_percent_less + i * step for i in range(num_values_in_range)]
+
+    return range_values
+
+
+def gen_completion_msg(model, save_path=DEFAULT_MODEL_OUTPUT_PATH):
+    """
+    Prints a completion message with the model's parameters and recommended ranges.
+
+    Displays the batch size, learning rate, accuracy, and save location of the best model.
+    Recommends a range of parameters for further training.
+
+    Args:
+        model (BestModel): The best model found during optimization.
+        save_path (Path): The path where the model was saved. Default is DEFAULT_MODEL_OUTPUT_PATH.
+
+    Returns:
+        None
+    """
+    print(f"The best model generated for the current data set had the following parameters:"
+          f"\n\tBatch size: {model.batch_size}"
+          f"\n\tLearning rate: {model.learning_rate:.6f}"
+          f"\n\tThe model has an accuracy of {model.accuracy:.2f}%"
+          f"\n\tThe model is saved as {save_path}")
+
+    batch_size_range = [int(i) for i in get_range(model.batch_size)]
+    learning_rate_range = get_range(model.learning_rate)
+
+    print(f"It is recommended to start training models for the current data set the following parameter range:"
+          f"\n\tBatch size between {batch_size_range[0]} and {batch_size_range[-1]}."
+          f"\n\tLearning rate between {learning_rate_range[0]:.6f} and {learning_rate_range[-1]:.6f}.")
+
+
+def check_data_paths(directory=DEFAULT_DATA_PATH):
+    """
+    Checks if the necessary training and validation directories exist and contain files.
+
+    Ensures that the data directory structure is correct and that each required directory contains files.
+
+    Args:
+        directory (Path): The root directory for the training and validation data.
+
+    Raises:
+        ModelOptimizerException: If any required directory is missing or empty.
+
+    Returns:
+        None
+    """
+    train_desired_dir = directory / DEFAULT_TRAINING_DESIRED_DIR
+    train_not_desired_dir = directory / DEFAULT_TRAINING_NOT_DESIRED_DIR
+    validation_desired_dir = directory / DEFAULT_VALIDATION_DESIRED_DIR
+    validation_not_desired_dir = directory / DEFAULT_VALIDATION_NOT_DESIRED_DIR
+
+    paths = [train_desired_dir, train_not_desired_dir, validation_desired_dir, validation_not_desired_dir]
+
+    for path in paths:
+        if not check_directory_exists(path):
+            raise ModelOptimizerException(f"Training data directory not found: ({path.resolve()}). ")
+        if not check_directory_is_not_empty(path):
+            raise ModelOptimizerException(f"Training data directory contains no files: ({path.resolve()}).")
+
+
+def check_directory_exists(directory):
+    """
+    Checks if a directory exists and is a valid directory.
+
+    Args:
+        directory (Path): The directory to check.
+
+    Returns:
+        bool: True if the directory exists and is a valid directory, False otherwise.
+    """
+    return directory.exists() and directory.is_dir()
+
+
+def check_directory_is_not_empty(directory):
+    """
+    Checks if a directory contains any files or subdirectories.
+
+    Args:
+        directory (Path): The directory to check.
+
+    Returns:
+        bool: True if the directory contains any files or subdirectories, False otherwise.
+    """
+    return any(directory.iterdir())
+
+
+def create_directory_if_not_exists(directory):
+    """
+    Creates a directory if it does not already exist.
+
+    Args:
+        directory (Path): The path to the directory to create.
+
+    Returns:
+        None
+    """
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def parse_args():
+    """
+    Parses command-line arguments.
+
+    Defines the arguments for data paths, model output paths, verbosity, learning rate, batch size, and epochs.
+    Returns the parsed arguments as a Namespace object.
+
+    Args:
+        None
+
+    Returns:
+        argparse.Namespace: The parsed command-line arguments.
+    """
+    parser = argparse.ArgumentParser(description="A script that processes input and output files.")
+
+    parser.add_argument("--info", action="store_true", help=f"Print full module description.")
+    parser.add_argument("--data-path", type=str,
+                        help=f"Path to training and validation images. Default: {DEFAULT_DATA_PATH}.")
+    parser.add_argument("--model-output-path", type=str,
+                        help=f"Directory to save model. Default: {DEFAULT_MODEL_OUTPUT_PATH}.")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE,
+                        help=f"Learning rate for the model. Default: {DEFAULT_LEARNING_RATE}.")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Training batch size. Default: {DEFAULT_BATCH_SIZE}.")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_NUM_EPOCHS, help=f"Number of training epochs. Default: "
+                                                                               f"{DEFAULT_NUM_EPOCHS}.")
+
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    main()
