@@ -127,5 +127,5 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 For any inquiries or issues, please contact:
 
 Graham Steeds  
-Email: steeds.g@gamil.com  
+Email: steeds.g@gmail.com  
 GitHub: [github.com/wise-elm](https://github.com/wise-elm)
